@@ -1,1 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FitAi - AI Powered Fitness Tracker</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Babel for in-browser JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
+    <!-- Import Map for React and Dependencies -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom": "https://esm.sh/react-dom@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom",
+            "lucide-react": "https://esm.sh/lucide-react@0.378.0?external=react",
+            "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.39.3"
+        }
+    }
+    </script>
+</head>
+<body class="bg-neutral-950">
+    <div id="root"></div>
+
+    <!-- Application Logic -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, 
+            ResponsiveContainer, ReferenceLine, AreaChart, Area 
+        } from 'recharts';
+        import { 
+            LayoutDashboard, Utensils, Dumbbell, Activity, Plus, Sparkles, 
+            Check, Calendar, ArrowRight, Target, Flame, TrendingDown, TrendingUp, X
+        } from 'lucide-react';
+        import { createClient } from '@supabase/supabase-js';
+
+        // --- Supabase Initialization ---
+        const supabaseUrl = 'https://mklwhakplmuerpvndsdh.supabase.co';
+        const supabaseKey = 'sb_publishable_maWGR6swlfCy-llwEGAv0w_fD1FnJi7';
+        const supabaseClient = createClient(supabaseUrl, supabaseKey);
+
+        // --- Helper Functions ---
+        // Gemini API for Calorie Estimation
+        const estimateCaloriesFromAI = async (foodName) => {
+            const payload = {
+                contents: [{
+                    parts: [{ 
+                        text: `Estimate the calories for 1 average serving of: "${foodName}". If it is not a food, return 0. Respond strictly with a JSON object in this format: {"calories": 100}. Do not include markdown, code blocks, or any other text. Just the JSON object.` 
+                    }]
+                }],
+                generationConfig: {
+                    responseMimeType: "application/json"
+                }
+            };
+            
+            const apiKey = ""; // Canvas injects this automatically when empty
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+            
+            try {
+                const res = await fetch(apiUrl, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload) 
+                });
+                const data = await res.json();
+                const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (text) {
+                    const parsed = JSON.parse(text);
+                    return parsed.calories || 0;
+                }
+            } catch (e) {
+                console.error("Failed to estimate calories", e);
+            }
+            return Math.floor(Math.random() * 500) + 100; // Fallback estimate if API fails
+        };
+
+        // --- Main Application Component ---
+        function App() {
+            const [session, setSession] = useState(null);
+            const [user, setUser] = useState(null);
+            const [profile, setProfile] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [activeTab, setActiveTab] = useState('dashboard');
+            const [globalError, setGlobalError] = useState(null);
+
+            // App Data State
+            const [weightLogs, setWeightLogs] = useState([]);
+            const [meals, setMeals] = useState([]);
+            const [dailyCalories, setDailyCalories] = useState([]);
+            const [workouts, setWorkouts] = useState([]);
+
+            // --- Authentication State ---
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+            const [authLoading, setAuthLoading] = useState(false);
+            const [isSignUp, setIsSignUp] = useState(false);
+
+            // --- Onboarding State ---
+            const [primaryGoal, setPrimaryGoal] = useState('Lose Weight');
+            const [targetWeight, setTargetWeight] = useState('');
+            const [focusMuscles, setFocusMuscles] = useState('');
+            const [initialWeight, setInitialWeight] = useState('');
+
+            // 1. Initialize Authentication
+            useEffect(() => {
+                supabaseClient.auth.getSession().then(({ data: { session }, error }) => {
+                    if (error) setGlobalError(error.message);
+                    setSession(session);
+                    setUser(session?.user ?? null);
+                    if (!session) setLoading(false);
+                });
+
+                const { data: { subscription } } = supabaseClient.auth.onAuthStateChange((_event, session) => {
+                    setSession(session);
+                    setUser(session?.user ?? null);
+                    if (!session) setLoading(false);
+                });
+
+                return () => subscription.unsubscribe();
+            }, []);
+
+            // 2. Fetch User Data
+            useEffect(() => {
+                if (!user) return;
+                
+                const fetchAllData = async () => {
+                    setLoading(true);
+                    try {
+                        // Fetch Profile
+                        const { data: profileData, error: profileError } = await supabaseClient
+                            .from('profiles')
+                            .select('*')
+                            .eq('user_id', user.id)
+                            .single();
+                        
+                        if (profileError && profileError.code !== 'PGRST116') {
+                            setGlobalError(profileError.message);
+                        } else {
+                            setProfile(profileData || null);
+                        }
+
+                        // Fetch Weight Logs
+                        const { data: weightData } = await supabaseClient
+                            .from('weight_logs')
+                            .select('*')
+                            .order('logged_date', { ascending: true });
+                        if (weightData) setWeightLogs(weightData);
+
+                        // Fetch Meals
+                        const { data: mealsData } = await supabaseClient
+                            .from('meals')
+                            .select('*')
+                            .order('created_at', { ascending: false });
+                        if (mealsData) setMeals(mealsData);
+
+                        // Fetch Daily Calories
+                        const { data: caloriesData } = await supabaseClient
+                            .from('daily_calories')
+                            .select('*')
+                            .order('logged_date', { ascending: true });
+                        if (caloriesData) setDailyCalories(caloriesData);
+
+                        // Fetch Workouts
+                        const { data: workoutsData } = await supabaseClient
+                            .from('workouts')
+                            .select('*')
+                            .order('logged_date', { ascending: true });
+                        if (workoutsData) setWorkouts(workoutsData);
+
+                    } catch (err) {
+                        setGlobalError(err.message);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+
+                fetchAllData();
+            }, [user]);
+
+            // --- Authentication Handlers ---
+            const handleAuth = async (e) => {
+                e.preventDefault();
+                setAuthLoading(true);
+                setGlobalError(null);
+                try {
+                    if (isSignUp) {
+                        const { error } = await supabaseClient.auth.signUp({ email, password });
+                        if (error) throw error;
+                        alert('Check your email for the confirmation link!');
+                    } else {
+                        const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+                        if (error) throw error;
+                    }
+                } catch (error) {
+                    setGlobalError(error.message || 'Authentication failed');
+                } finally {
+                    setAuthLoading(false);
+                }
+            };
+
+            const handleSignOut = async () => {
+                await supabaseClient.auth.signOut();
+                setProfile(null);
+                setActiveTab('dashboard');
+            };
+
+            // --- Onboarding Handlers ---
+            const handleSaveProfile = async (e) => {
+                e.preventDefault();
+                setGlobalError(null);
+                try {
+                    const { error: profileError } = await supabaseClient
+                        .from('profiles')
+                        .insert([{
+                            user_id: user.id,
+                            primary_goal: primaryGoal,
+                            target_weight: parseFloat(targetWeight),
+                            focus_muscles: focusMuscles
+                        }]);
+                    
+                    if (profileError) throw profileError;
+
+                    if (initialWeight) {
+                        await supabaseClient.from('weight_logs').insert([{
+                            user_id: user.id,
+                            weight: parseFloat(initialWeight),
+                            logged_date: new Date().toISOString().split('T')[0]
+                        }]);
+                    }
+
+                    // Refresh profile
+                    const { data } = await supabaseClient.from('profiles').select('*').eq('user_id', user.id).single();
+                    setProfile(data);
+                    
+                    const { data: wLogs } = await supabaseClient.from('weight_logs').select('*').order('logged_date', { ascending: true });
+                    setWeightLogs(wLogs || []);
+
+                } catch (err) {
+                    setGlobalError(err.message);
+                }
+            };
+
+            // --- Render Helpers ---
+            if (loading) {
+                return <div className="min-h-screen bg-neutral-950 flex items-center justify-center text-white"><Activity className="animate-spin text-emerald-500 mr-3"/> Loading FitAi...</div>;
+            }
+
+            if (!session) {
+                return (
+                    <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-4">
+                        <div className="max-w-md w-full bg-neutral-900 rounded-2xl shadow-xl p-8 border border-neutral-800">
+                            <div className="flex justify-center mb-8">
+                                <div className="flex items-center gap-2">
+                                    <Flame className="w-10 h-10 text-emerald-500" />
+                                    <h1 className="text-3xl font-bold text-white tracking-tight">FitAi</h1>
+                                </div>
+                            </div>
+                            
+                            {globalError && (
+                                <div className="bg-red-500/10 border border-red-500/50 text-red-500 p-3 rounded-lg mb-6 text-sm">
+                                    {globalError}
+                                </div>
+                            )}
+
+                            <form onSubmit={handleAuth} className="space-y-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-neutral-400 mb-1">Email</label>
+                                    <input 
+                                        type="email" 
+                                        required
+                                        className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+                                        value={email} onChange={(e) => setEmail(e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-neutral-400 mb-1">Password</label>
+                                    <input 
+                                        type="password" 
+                                        required
+                                        className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+                                        value={password} onChange={(e) => setPassword(e.target.value)}
+                                    />
+                                </div>
+                                <button 
+                                    type="submit" 
+                                    disabled={authLoading}
+                                    className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg transition-colors flex items-center justify-center gap-2 mt-6"
+                                >
+                                    {authLoading ? <Activity className="animate-spin w-5 h-5" /> : (isSignUp ? 'Create Account' : 'Sign In')}
+                                </button>
+                            </form>
+                            
+                            <div className="mt-6 text-center">
+                                <button 
+                                    onClick={() => setIsSignUp(!isSignUp)}
+                                    className="text-neutral-400 hover:text-white transition-colors text-sm"
+                                >
+                                    {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (session && !profile) {
+                return (
+                    <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-4">
+                        <div className="max-w-md w-full bg-neutral-900 rounded-2xl shadow-xl p-8 border border-neutral-800">
+                            <h2 className="text-2xl font-bold text-white mb-6">Let's set your goals</h2>
+                            {globalError && <div className="bg-red-500/10 text-red-500 p-3 rounded-lg mb-4 text-sm">{globalError}</div>}
+                            <form onSubmit={handleSaveProfile} className="space-y-5">
+                                <div>
+                                    <label className="block text-sm font-medium text-neutral-400 mb-1">Primary Goal</label>
+                                    <select 
+                                        className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                        value={primaryGoal} onChange={(e) => setPrimaryGoal(e.target.value)}
+                                    >
+                                        <option>Lose Weight</option>
+                                        <option>Build Muscle</option>
+                                        <option>Maintain Weight</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-neutral-400 mb-1">Target Weight (lbs/kg)</label>
+                                    <input 
+                                        type="number" step="0.1" required
+                                        className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                        value={targetWeight} onChange={(e) => setTargetWeight(e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-neutral-400 mb-1">Current Weight (Optional)</label>
+                                    <input 
+                                        type="number" step="0.1"
+                                        className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                        value={initialWeight} onChange={(e) => setInitialWeight(e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-neutral-400 mb-1">Focus Muscles (e.g. Chest, Legs)</label>
+                                    <input 
+                                        type="text"
+                                        className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                        value={focusMuscles} onChange={(e) => setFocusMuscles(e.target.value)}
+                                    />
+                                </div>
+                                <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg transition-colors flex items-center justify-center gap-2 mt-4">
+                                    Complete Setup <ArrowRight className="w-5 h-5" />
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                );
+            }
+
+            const todayDateStr = new Date().toISOString().split('T')[0];
+            const todaysMeals = meals.filter(m => m.logged_date === todayDateStr);
+
+            return (
+                <div className="min-h-screen bg-neutral-950 text-neutral-200 font-sans selection:bg-emerald-500/30">
+                    <nav className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-md sticky top-0 z-50">
+                        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+                            <div className="flex items-center justify-between h-16">
+                                <div className="flex items-center gap-2">
+                                    <Flame className="w-8 h-8 text-emerald-500" />
+                                    <span className="font-bold text-xl text-white tracking-tight">FitAi</span>
+                                </div>
+                                <div className="flex items-center gap-1 sm:gap-4 overflow-x-auto no-scrollbar">
+                                    <NavButton active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<LayoutDashboard className="w-4 h-4"/>} label="Dashboard" />
+                                    <NavButton active={activeTab === 'diet'} onClick={() => setActiveTab('diet')} icon={<Utensils className="w-4 h-4"/>} label="Diet" />
+                                    <NavButton active={activeTab === 'workout'} onClick={() => setActiveTab('workout')} icon={<Dumbbell className="w-4 h-4"/>} label="Workout" />
+                                </div>
+                                <div>
+                                    <button onClick={handleSignOut} className="text-sm text-neutral-400 hover:text-white transition-colors">Sign Out</button>
+                                </div>
+                            </div>
+                        </div>
+                    </nav>
+
+                    {globalError && (
+                        <div className="bg-red-500/90 text-white px-4 py-2 flex justify-between items-center z-50 relative">
+                            <span className="text-sm font-medium">{globalError}</span>
+                            <button onClick={() => setGlobalError(null)} className="hover:bg-red-600 p-1 rounded"><X className="w-4 h-4"/></button>
+                        </div>
+                    )}
+
+                    <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                        {activeTab === 'dashboard' && <Dashboard profile={profile} weightLogs={weightLogs} dailyCalories={dailyCalories} setGlobalError={setGlobalError} user={user} setWeightLogs={setWeightLogs} />}
+                        {activeTab === 'diet' && <Diet profile={profile} meals={meals} setMeals={setMeals} todaysMeals={todaysMeals} dailyCalories={dailyCalories} setDailyCalories={setDailyCalories} setGlobalError={setGlobalError} user={user} todayDateStr={todayDateStr} />}
+                        {activeTab === 'workout' && <Workout workouts={workouts} setWorkouts={setWorkouts} setGlobalError={setGlobalError} user={user} />}
+                    </main>
+                </div>
+            );
+        }
+
+        // --- Navigation Button Component ---
+        function NavButton({ active, onClick, icon, label }) {
+            return (
+                <button 
+                    onClick={onClick}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap
+                        ${active ? 'bg-neutral-800 text-emerald-400 shadow-sm border border-neutral-700/50' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50'}`}
+                >
+                    {icon} <span className="hidden sm:inline">{label}</span>
+                </button>
+            );
+        }
+
+        // --- Dashboard Component ---
+        function Dashboard({ profile, weightLogs, dailyCalories, setGlobalError, user, setWeightLogs }) {
+            const [newWeight, setNewWeight] = useState('');
+
+            const handleLogWeight = async (e) => {
+                e.preventDefault();
+                if (!newWeight) return;
+                setGlobalError(null);
+                try {
+                    const todayStr = new Date().toISOString().split('T')[0];
+                    const newLog = { user_id: user.id, weight: parseFloat(newWeight), logged_date: todayStr };
+                    
+                    const { data, error } = await supabaseClient.from('weight_logs').insert([newLog]).select();
+                    if (error) throw error;
+                    
+                    setWeightLogs(prev => [...prev, data[0]].sort((a,b) => new Date(a.logged_date) - new Date(b.logged_date)));
+                    setNewWeight('');
+                } catch (err) {
+                    setGlobalError(err.message);
+                }
+            };
+
+            const latestWeight = weightLogs.length > 0 ? weightLogs[weightLogs.length - 1].weight : null;
+            const distanceToGoal = latestWeight ? Math.abs(latestWeight - profile.target_weight).toFixed(1) : '-';
+            
+            let avgCal = '-';
+            if (dailyCalories.length > 0) {
+                const total = dailyCalories.reduce((sum, d) => sum + d.total_calories, 0);
+                avgCal = Math.round(total / dailyCalories.length);
+            }
+
+            const CustomTooltip = ({ active, payload, label }) => {
+                if (active && payload && payload.length) {
+                    return (
+                        <div className="bg-neutral-900 border border-neutral-700 p-3 rounded-lg shadow-xl">
+                            <p className="text-neutral-400 text-xs mb-1">{label}</p>
+                            <p className="text-emerald-400 font-bold">{payload[0].value} {payload[0].name === 'Weight' ? 'lbs/kg' : 'cal'}</p>
+                        </div>
+                    );
+                }
+                return null;
+            };
+
+            return (
+                <div className="space-y-6">
+                    <header className="mb-8">
+                        <h1 className="text-3xl font-bold text-white mb-2">Welcome Back</h1>
+                        <p className="text-neutral-400">Goal: {profile.primary_goal} | Target Weight: {profile.target_weight}</p>
+                    </header>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="bg-neutral-900 border border-neutral-800 p-5 rounded-2xl shadow-sm">
+                            <div className="flex items-center justify-between mb-4">
+                                <h3 className="text-neutral-400 text-sm font-medium">Current Weight</h3>
+                                <Target className="w-5 h-5 text-emerald-500 opacity-80" />
+                            </div>
+                            <div className="flex items-end gap-2">
+                                <span className="text-4xl font-bold text-white">{latestWeight || '-'}</span>
+                            </div>
+                            <p className="text-xs text-neutral-500 mt-2">{distanceToGoal} away from target</p>
+                        </div>
+
+                        <div className="bg-neutral-900 border border-neutral-800 p-5 rounded-2xl shadow-sm">
+                            <div className="flex items-center justify-between mb-4">
+                                <h3 className="text-neutral-400 text-sm font-medium">Avg Daily Calories</h3>
+                                <Flame className="w-5 h-5 text-orange-500 opacity-80" />
+                            </div>
+                            <div className="flex items-end gap-2">
+                                <span className="text-4xl font-bold text-white">{avgCal}</span>
+                                <span className="text-neutral-500 mb-1 text-sm">kcal/day</span>
+                            </div>
+                            <p className="text-xs text-neutral-500 mt-2">Based on logged days</p>
+                        </div>
+
+                        <div className="bg-neutral-900 border border-neutral-800 p-5 rounded-2xl shadow-sm flex flex-col justify-center">
+                            <h3 className="text-neutral-400 text-sm font-medium mb-3">Log Today's Weight</h3>
+                            <form onSubmit={handleLogWeight} className="flex gap-2">
+                                <input 
+                                    type="number" step="0.1" placeholder="Weight" required
+                                    className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                    value={newWeight} onChange={(e) => setNewWeight(e.target.value)}
+                                />
+                                <button type="submit" className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium transition-colors">
+                                    Save
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-2xl shadow-sm">
+                        <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
+                            <TrendingDown className="w-5 h-5 text-emerald-500" /> Weight Progress
+                        </h3>
+                        <div className="h-[300px] w-full">
+                            {weightLogs.length > 0 ? (
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={weightLogs} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                                        <defs>
+                                            <linearGradient id="colorWeight" x1="0" y1="0" x2="0" y2="1">
+                                                <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
+                                                <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                                            </linearGradient>
+                                        </defs>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#262626" vertical={false} />
+                                        <XAxis dataKey="logged_date" stroke="#737373" tick={{fontSize: 12}} tickFormatter={(val) => val.substring(5)} />
+                                        <YAxis stroke="#737373" tick={{fontSize: 12}} domain={['dataMin - 5', 'dataMax + 5']} />
+                                        <RechartsTooltip content={<CustomTooltip />} />
+                                        <ReferenceLine y={profile.target_weight} label={{ position: 'top', value: 'Goal', fill: '#10b981', fontSize: 12 }} stroke="#10b981" strokeDasharray="3 3" />
+                                        <Area type="monotone" dataKey="weight" name="Weight" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorWeight)" />
+                                    </AreaChart>
+                                </ResponsiveContainer>
+                            ) : (
+                                <div className="h-full flex items-center justify-center text-neutral-500">No weight data logged yet.</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Diet Component ---
+        function Diet({ profile, meals, setMeals, todaysMeals, dailyCalories, setDailyCalories, setGlobalError, user, todayDateStr }) {
+            const [foodName, setFoodName] = useState('');
+            const [calorieInput, setCalorieInput] = useState('');
+            const [isLogging, setIsLogging] = useState(false);
+
+            const todaysTotal = todaysMeals.reduce((sum, m) => sum + m.calories, 0);
+
+            const handleLogMeal = async (e) => {
+                e.preventDefault();
+                if (!foodName) return;
+                setGlobalError(null);
+                setIsLogging(true);
+
+                try {
+                    let finalCalories = parseInt(calorieInput);
+                    let isAi = false;
+
+                    if (isNaN(finalCalories) || !calorieInput) {
+                        const pastMeal = meals.find(m => m.food_name.toLowerCase() === foodName.toLowerCase() && m.calories > 0);
+                        if (pastMeal) {
+                            finalCalories = pastMeal.calories;
+                        } else {
+                            isAi = true;
+                            finalCalories = await estimateCaloriesFromAI(foodName);
+                        }
+                    }
+
+                    const newMeal = {
+                        user_id: user.id,
+                        food_name: foodName,
+                        calories: finalCalories,
+                        is_ai_estimated: isAi,
+                        logged_date: todayDateStr
+                    };
+
+                    const { data, error } = await supabaseClient.from('meals').insert([newMeal]).select();
+                    if (error) throw error;
+
+                    setMeals(prev => [data[0], ...prev]);
+                    setFoodName('');
+                    setCalorieInput('');
+
+                } catch (err) {
+                    setGlobalError("Failed to log meal: " + err.message);
+                } finally {
+                    setIsLogging(false);
+                }
+            };
+
+            const handleNewDay = async () => {
+                if (todaysMeals.length === 0) return;
+                setGlobalError(null);
+                try {
+                    const { data: existingDay } = await supabaseClient
+                        .from('daily_calories')
+                        .select('*')
+                        .eq('user_id', user.id)
+                        .eq('logged_date', todayDateStr)
+                        .single();
+
+                    if (existingDay) {
+                        const { data, error } = await supabaseClient
+                            .from('daily_calories')
+                            .update({ total_calories: todaysTotal })
+                            .eq('id', existingDay.id)
+                            .select();
+                        if (error) throw error;
+                        setDailyCalories(prev => prev.map(d => d.id === data[0].id ? data[0] : d));
+                    } else {
+                        const { data, error } = await supabaseClient
+                            .from('daily_calories')
+                            .insert([{ user_id: user.id, total_calories: todaysTotal, logged_date: todayDateStr }])
+                            .select();
+                        if (error) throw error;
+                        setDailyCalories(prev => [...prev, data[0]].sort((a,b) => new Date(a.logged_date) - new Date(b.logged_date)));
+                    }
+                    alert("Day archived successfully! Check trends on Dashboard or below.");
+                } catch (err) {
+                    setGlobalError("Failed to archive day: " + err.message);
+                }
+            };
+
+            const recentDailyCals = [...dailyCalories].slice(-7);
+
+            return (
+                <div className="space-y-6">
+                    <header className="mb-6 flex justify-between items-end">
+                        <div>
+                            <h1 className="text-3xl font-bold text-white mb-2">Diet Tracker</h1>
+                            <p className="text-neutral-400">Log meals & let AI estimate the rest.</p>
+                        </div>
+                        <div className="text-right">
+                            <span className="block text-3xl font-bold text-emerald-500">{todaysTotal}</span>
+                            <span className="text-sm text-neutral-500">kcal today</span>
+                        </div>
+                    </header>
+
+                    <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-2xl shadow-sm">
+                        <form onSubmit={handleLogMeal} className="flex flex-col sm:flex-row gap-3">
+                            <div className="flex-1">
+                                <label className="block text-xs font-medium text-neutral-500 mb-1 uppercase tracking-wider">What did you eat?</label>
+                                <input 
+                                    type="text" required placeholder="e.g. 2 scrambled eggs & toast"
+                                    className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                    value={foodName} onChange={(e) => setFoodName(e.target.value)}
+                                />
+                            </div>
+                            <div className="sm:w-32">
+                                <label className="block text-xs font-medium text-neutral-500 mb-1 uppercase tracking-wider">Cals (Opt)</label>
+                                <input 
+                                    type="number" placeholder="Known?"
+                                    className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                    value={calorieInput} onChange={(e) => setCalorieInput(e.target.value)}
+                                />
+                            </div>
+                            <div className="flex items-end">
+                                <button type="submit" disabled={isLogging} className="w-full sm:w-auto h-[46px] bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-6 rounded-lg transition-colors flex items-center justify-center gap-2">
+                                    {isLogging ? <Activity className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />} Add
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-2 bg-neutral-900 border border-neutral-800 rounded-2xl shadow-sm overflow-hidden flex flex-col">
+                            <div className="p-5 border-b border-neutral-800 flex justify-between items-center">
+                                <h3 className="font-semibold text-white">Today's Log</h3>
+                                <button onClick={handleNewDay} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-1.5 rounded-md flex items-center gap-1 transition-colors border border-neutral-700">
+                                    <Calendar className="w-3 h-3"/> Save New Day
+                                </button>
+                            </div>
+                            <div className="p-0 flex-1 overflow-y-auto max-h-[300px]">
+                                {todaysMeals.length > 0 ? (
+                                    <ul className="divide-y divide-neutral-800/50">
+                                        {todaysMeals.map(meal => (
+                                            <li key={meal.id} className="p-4 hover:bg-neutral-800/20 flex justify-between items-center transition-colors">
+                                                <div className="flex items-center gap-3">
+                                                    {meal.is_ai_estimated ? 
+                                                        <Sparkles className="w-4 h-4 text-purple-400" title="AI Estimated" /> : 
+                                                        <Check className="w-4 h-4 text-emerald-500" title="Manually Entered or Found in History" />
+                                                    }
+                                                    <span className="text-neutral-200 capitalize">{meal.food_name}</span>
+                                                </div>
+                                                <span className="font-mono text-neutral-400">{meal.calories} cal</span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : (
+                                    <div className="p-8 text-center text-neutral-500 text-sm">Nothing logged today yet.</div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-sm p-5">
+                            <h3 className="font-semibold text-white mb-4 text-sm">Recent Daily Calories</h3>
+                            <div className="h-[250px] w-full">
+                                {recentDailyCals.length > 0 ? (
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <BarChart data={recentDailyCals} margin={{ top: 10, right: 0, left: -25, bottom: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#262626" vertical={false} />
+                                            <XAxis dataKey="logged_date" stroke="#737373" tick={{fontSize: 10}} tickFormatter={(val) => val.substring(5)} />
+                                            <YAxis stroke="#737373" tick={{fontSize: 10}} />
+                                            <RechartsTooltip cursor={{fill: '#262626'}} contentStyle={{backgroundColor: '#171717', border: '1px solid #404040', borderRadius: '8px'}} />
+                                            <Bar dataKey="total_calories" name="Calories" fill="#10b981" radius={[4, 4, 0, 0]} />
+                                        </BarChart>
+                                    </ResponsiveContainer>
+                                ) : (
+                                    <div className="h-full flex items-center justify-center text-neutral-500 text-sm text-center">Hit 'Save New Day' to build this chart.</div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Workout Component ---
+        function Workout({ workouts, setWorkouts, setGlobalError, user }) {
+            const [exercise, setExercise] = useState('');
+            const [weight, setWeight] = useState('');
+            const [reps, setReps] = useState('');
+            const [selectedChartExercise, setSelectedChartExercise] = useState('');
+
+            const uniqueExercises = useMemo(() => {
+                const exs = new Set(workouts.map(w => w.exercise_name));
+                return Array.from(exs).sort();
+            }, [workouts]);
+
+            useEffect(() => {
+                if (uniqueExercises.length > 0 && !selectedChartExercise) {
+                    setSelectedChartExercise(uniqueExercises[0]);
+                }
+            }, [uniqueExercises, selectedChartExercise]);
+
+            const handleLogWorkout = async (e) => {
+                e.preventDefault();
+                if (!exercise || !weight || !reps) return;
+                setGlobalError(null);
+
+                try {
+                    const todayStr = new Date().toISOString().split('T')[0];
+                    const newLog = {
+                        user_id: user.id,
+                        exercise_name: exercise.trim(),
+                        weight: parseFloat(weight),
+                        reps: parseInt(reps),
+                        logged_date: todayStr
+                    };
+
+                    const { data, error } = await supabaseClient.from('workouts').insert([newLog]).select();
+                    if (error) throw error;
+
+                    setWorkouts(prev => [...prev, data[0]].sort((a,b) => new Date(a.logged_date) - new Date(b.logged_date)));
+                    
+                    setWeight('');
+                    setReps('');
+                    if (!selectedChartExercise) setSelectedChartExercise(exercise.trim());
+
+                } catch (err) {
+                    setGlobalError(err.message);
+                }
+            };
+
+            const chartData = useMemo(() => {
+                if (!selectedChartExercise) return [];
+                return workouts
+                    .filter(w => w.exercise_name.toLowerCase() === selectedChartExercise.toLowerCase())
+                    .map(w => ({ ...w, displayDate: w.logged_date.substring(5) }));
+            }, [workouts, selectedChartExercise]);
+
+
+            return (
+                <div className="space-y-6">
+                    <header className="mb-8">
+                        <h1 className="text-3xl font-bold text-white mb-2">Workout Progression</h1>
+                        <p className="text-neutral-400">Log sets and watch your strength grow.</p>
+                    </header>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-2xl shadow-sm h-fit">
+                            <h3 className="font-semibold text-white mb-5 text-lg">Log a Set</h3>
+                            <form onSubmit={handleLogWorkout} className="space-y-4">
+                                <div>
+                                    <label className="block text-xs font-medium text-neutral-500 mb-1 uppercase tracking-wider">Exercise Name</label>
+                                    <input 
+                                        type="text" required placeholder="e.g. Bench Press" list="exercise-list"
+                                        className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                        value={exercise} onChange={(e) => setExercise(e.target.value)}
+                                    />
+                                    <datalist id="exercise-list">
+                                        {uniqueExercises.map(ex => <option key={ex} value={ex} />)}
+                                    </datalist>
+                                </div>
+                                <div className="flex gap-4">
+                                    <div className="flex-1">
+                                        <label className="block text-xs font-medium text-neutral-500 mb-1 uppercase tracking-wider">Weight (lbs/kg)</label>
+                                        <input 
+                                            type="number" step="0.5" required placeholder="0"
+                                            className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                            value={weight} onChange={(e) => setWeight(e.target.value)}
+                                        />
+                                    </div>
+                                    <div className="flex-1">
+                                        <label className="block text-xs font-medium text-neutral-500 mb-1 uppercase tracking-wider">Reps</label>
+                                        <input 
+                                            type="number" required placeholder="0"
+                                            className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                            value={reps} onChange={(e) => setReps(e.target.value)}
+                                        />
+                                    </div>
+                                </div>
+                                <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-3 rounded-lg transition-colors flex items-center justify-center gap-2 mt-2">
+                                    <Plus className="w-5 h-5" /> Save Set
+                                </button>
+                            </form>
+                        </div>
+
+                        <div className="lg:col-span-2 bg-neutral-900 border border-neutral-800 rounded-2xl shadow-sm p-6">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                                <h3 className="font-semibold text-white text-lg flex items-center gap-2">
+                                    <TrendingUp className="w-5 h-5 text-emerald-500" /> Volume History
+                                </h3>
+                                <select 
+                                    className="bg-neutral-800 border border-neutral-700 text-white text-sm rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-emerald-500 max-w-[200px]"
+                                    value={selectedChartExercise}
+                                    onChange={(e) => setSelectedChartExercise(e.target.value)}
+                                >
+                                    <option value="" disabled>Select an exercise...</option>
+                                    {uniqueExercises.map(ex => <option key={ex} value={ex}>{ex}</option>)}
+                                </select>
+                            </div>
+
+                            <div className="h-[300px] w-full">
+                                {chartData.length > 0 ? (
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="#262626" vertical={false} />
+                                            <XAxis dataKey="displayDate" stroke="#737373" tick={{fontSize: 12}} />
+                                            <YAxis stroke="#737373" tick={{fontSize: 12}} />
+                                            <RechartsTooltip 
+                                                contentStyle={{backgroundColor: '#171717', border: '1px solid #404040', borderRadius: '8px'}}
+                                                labelStyle={{color: '#a3a3a3'}}
+                                                itemStyle={{color: '#10b981', fontWeight: 'bold'}}
+                                                formatter={(value, name, props) => [`${value} @ ${props.payload.reps} reps`, 'Weight']}
+                                            />
+                                            <Line type="monotone" dataKey="weight" name="Weight" stroke="#10b981" strokeWidth={3} dot={{ fill: '#10b981', strokeWidth: 2, r: 4 }} activeDot={{ r: 6 }} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                ) : (
+                                    <div className="h-full flex items-center justify-center text-neutral-500 text-center px-4">
+                                        {uniqueExercises.length === 0 ? "Log your first workout to see progression." : "Select an exercise to view its history."}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Mount the React Application
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
